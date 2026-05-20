@@ -1,0 +1,685 @@
+---
+title: "Perbandingan Tiga Metode Clustering"
+subtitle: "DBSCAN | Spectral Clustering | Model-Based (GMM via Mclust)"
+author: "Muhamd Hambali"
+date: "2026-05-20"
+output: rmdformats::readthedown
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+------------------------------------------------------------------------
+
+# Import Library & Persiapan Data
+
+Analisis ini membandingkan tiga metode clustering yang berbeda pendekatan — **DBSCAN** (berbasis densitas), **Spectral Clustering** (berbasis graf), dan **GMM / Model-Based Clustering** (berbasis probabilistik) — pada dataset kecil berisi 10 observasi dengan 4 variabel numerik (X1–X4). Tujuannya adalah memahami bagaimana masing-masing metode mengelompokkan data dan sejauh mana hasilnya konsisten satu sama lain.
+
+```{r libraries}
+library(dbscan)
+library(kernlab)
+library(mclust)
+library(ggplot2)
+library(ggrepel)
+library(patchwork)
+library(scales)
+library(reshape2)
+library(knitr)
+```
+
+## Dataset (10 Observasi)
+
+Dataset terdiri dari 10 observasi dengan 4 variabel numerik kontinu (X1, X2, X3, X4). Ukuran dataset yang kecil ini memungkinkan kita untuk menelusuri hasil clustering secara manual dan memahami perbedaan antar metode secara intuitif.
+
+```{r data}
+data <- data.frame(
+  X1 = c(11, 6,  9,  3,  4, 15,  9, 13,  4, 13),
+  X2 = c( 5, 3,  7,  7, 12,  8, 12,  9, 11,  7),
+  X3 = c( 7,11, 11,  7,  7,  4, 12, 11, 14,  3),
+  X4 = c( 6, 5,  8, 12, 12,  8,  6, 14,  6, 12)
+)
+rownames(data) <- paste0("Obs-", 1:10)
+
+kable(data, caption = "Dataset Clustering (10 Observasi)")
+```
+
+## Statistik Deskriptif
+
+```{r deskriptif}
+stats_df <- as.data.frame(round(apply(data, 2, function(x) c(
+  Min    = min(x),
+  Mean   = mean(x),
+  Median = median(x),
+  Max    = max(x),
+  SD     = sd(x)
+)), 2))
+
+kable(stats_df, caption = "Statistik Deskriptif")
+```
+
+Dari statistik deskriptif terlihat bahwa keempat variabel memiliki rentang nilai yang cukup lebar (sekitar 3–15) dengan rata-rata di kisaran 7–9. Standar deviasi yang relatif mirip antar variabel mengindikasikan variabilitas yang setara, sehingga **standarisasi tetap diperlukan** sebelum clustering agar tidak ada variabel yang mendominasi perhitungan jarak.
+
+------------------------------------------------------------------------
+
+# Preprocessing – Standarisasi & Reduksi Dimensi (PCA)
+
+## Standarisasi Data
+
+Sebelum clustering, data distandarisasi menggunakan **z-score** (mean = 0, SD = 1) melalui fungsi `scale()`. Langkah ini penting karena:
+
+-   Ketiga metode clustering yang digunakan sensitif terhadap skala data.
+-   Tanpa standarisasi, variabel dengan rentang nilai besar akan mendominasi perhitungan jarak Euclidean.
+
+## Principal Component Analysis (PCA)
+
+PCA digunakan **semata-mata untuk keperluan visualisasi** — data 4 dimensi diproyeksikan ke 2 dimensi (PC1 dan PC2) agar dapat digambarkan dalam scatter plot. Proses clustering sendiri tetap dilakukan pada data 4 dimensi yang sudah distandarisasi.
+
+```{r preprocessing}
+X_scaled <- scale(data)
+
+pca     <- prcomp(data, scale. = TRUE)
+X_pca   <- as.data.frame(pca$x[, 1:2])
+colnames(X_pca) <- c("PC1", "PC2")
+rownames(X_pca) <- rownames(data)
+
+var_exp   <- round(summary(pca)$importance[2, 1:2] * 100, 1)
+total_var <- sum(var_exp)
+```
+
+Variansi yang berhasil dijelaskan oleh dua komponen pertama:
+
+| Komponen            | Variansi Dijelaskan |
+|---------------------|---------------------|
+| **PC1**             | `r var_exp[1]`%     |
+| **PC2**             | `r var_exp[2]`%     |
+| **Total PC1 + PC2** | **`r total_var`%**  |
+
+> Total variansi `r total_var`% menunjukkan bahwa proyeksi 2D ini cukup **representatif** untuk memvisualisasikan struktur data. Artinya, pola yang tampak di scatter plot PCA mencerminkan sebagian besar informasi asli dari data 4 dimensi.
+
+```{r pca-coords}
+kable(round(X_pca, 3), caption = "Koordinat PCA Setiap Observasi")
+```
+
+------------------------------------------------------------------------
+
+# Metode 1 – DBSCAN {.tabset}
+
+## k-NN Distance Plot
+
+```{r dbscan-knn, fig.height=4, fig.width=6}
+# Menghitung jarak ke tetangga terdekat
+nbrs_dist <- kNNdist(X_scaled, k = 2)
+
+# Mengurutkan jarak
+dist_sorted <- sort(nbrs_dist)
+
+# Membuat plot
+plot(dist_sorted,
+     type = "l",
+     col = "#E63946",
+     lwd = 2,
+     main = "k-NN Distance Plot (k = 2)",
+     xlab = "Titik (diurutkan)",
+     ylab = "2-NN Distance")
+
+# Menentukan eps dari titik elbow
+eps_val <- 1.8
+
+# Garis merah putus-putus seperti contoh PDF
+abline(h = eps_val,
+       col = "blue",
+       lty = 2,
+       lwd = 2)
+
+# Tambahkan teks eps
+text(x = length(dist_sorted)*0.8,
+     y = eps_val + 0.03,
+     labels = paste("eps =", eps_val),
+     col = "black")
+```
+
+**Cara membaca plot ini:** Sumbu-x adalah observasi yang diurutkan dari jarak 2-NN terkecil ke terbesar, dan sumbu-y adalah jarak ke tetangga ke-2 terdekatnya. **Titik siku (elbow)** pada kurva menunjukkan ambang pemisah antara titik yang berada di area padat (jarak kecil) dan titik yang lebih terisolasi (jarak besar). Nilai `eps = 1.8` dipilih di sekitar titik ini.
+
+## Konsep & Parameter
+
+**DBSCAN** (*Density-Based Spatial Clustering of Applications with Noise*) adalah metode clustering berbasis densitas yang bekerja dengan prinsip: titik-titik yang berada di dalam lingkungan padat (*dense region*) dikelompokkan bersama, sedangkan titik-titik yang terisolasi dari area padat dianggap sebagai **noise (outlier)**.
+
+**Keunggulan utama DBSCAN:**
+
+-   Tidak perlu menentukan jumlah cluster di awal.
+-   Mampu menemukan cluster dengan bentuk arbitrer (non-convex, non-spherical).
+-   Secara otomatis mengidentifikasi outlier/noise.
+
+**Parameter yang digunakan:**
+
+| Parameter | Nilai | Penjelasan |
+|---------------------------|------------------|---------------------------|
+| `eps` | 1.8 | Radius lingkungan suatu titik (dalam ruang terstandarisasi) |
+| `minPts` | 2 | Jumlah minimum titik dalam radius `eps` agar suatu titik dianggap *core point* |
+
+Nilai `eps = 1.8` ditentukan berdasarkan **k-NN distance plot** (lihat tab sebelumnya), yaitu dengan mencari titik "siku" (*elbow*) pada kurva jarak yang terurut.
+
+## Parameter & Hasil
+
+```{r dbscan}
+eps_val <- 1.8
+
+db            <- dbscan(X_scaled, eps = eps_val, minPts = 2)
+dbscan_labels <- db$cluster   # 0 = noise
+
+n_clusters_db <- length(setdiff(unique(dbscan_labels), 0))
+n_noise_db    <- sum(dbscan_labels == 0)
+
+result_db <- data.frame(
+  Observasi      = rownames(data),
+  Cluster_DBSCAN = ifelse(dbscan_labels == 0, "Noise", paste0("Cluster ", dbscan_labels))
+)
+
+kable(result_db,
+      caption = sprintf("Hasil DBSCAN (eps=%.1f, min_samples=2) — %d klaster, %d noise",
+                        eps_val, n_clusters_db, n_noise_db))
+```
+
+**Interpretasi hasil:**
+
+DBSCAN hanya menemukan **`r n_clusters_db` cluster** dari data ini, dengan **`r n_noise_db` observasi** yang diklasifikasikan sebagai **noise**. Ini menunjukkan bahwa dengan parameter `eps = 1.5` dan `minPts = 2`, sebagian besar observasi berada dalam satu area yang cukup padat, sementara observasi yang berlabel *Noise* letaknya terlalu terisolasi untuk masuk ke cluster manapun. Hasil yang hanya 1 cluster ini berbeda dari dua metode lain (yang menghasilkan 3 cluster), mengindikasikan bahwa DBSCAN pada konfigurasi ini lebih konservatif dalam memisahkan kelompok.
+
+------------------------------------------------------------------------
+
+# Metode 2 – Spectral Clustering
+
+## Konsep & Parameter
+
+**Spectral Clustering** bekerja dengan cara yang berbeda dari metode berbasis jarak biasa. Algoritma ini terlebih dahulu mengkonstruksi **graf kemiripan (similarity graph)** antar observasi, kemudian menggunakan **eigendekomposisi** dari matriks Laplacian graf tersebut untuk mereduksi dimensi, dan baru menerapkan clustering (biasanya k-means) pada ruang berdimensi rendah hasil eigendekomposisi.
+
+**Keunggulan Spectral Clustering:**
+
+-   Efektif untuk cluster dengan bentuk non-convex dan struktur yang kompleks.
+-   Menangkap hubungan *global* antar titik melalui representasi graf.
+
+**Parameter yang digunakan:**
+
+| Parameter | Nilai | Penjelasan |
+|---------------------------|------------------|---------------------------|
+| `centers` | 3 | Jumlah cluster yang diinginkan |
+| `kernel` | `rbfdot` | Kernel RBF (Radial Basis Function) untuk menghitung kemiripan |
+| `sigma` | 1.0 | Parameter bandwidth kernel RBF — mengontrol seberapa cepat kemiripan menurun dengan jarak |
+
+```{r spectral}
+set.seed(42)
+spectral        <- specc(X_scaled, centers = 3,
+                          kernel = "rbfdot", kpar = list(sigma = 1.0))
+spectral_labels <- spectral@.Data
+
+result_sp <- data.frame(
+  Observasi        = rownames(data),
+  Cluster_Spectral = paste0("Cluster ", spectral_labels)
+)
+
+kable(result_sp,
+      caption = "Hasil Spectral Clustering (n_clusters=3, affinity=rbf, gamma=1.0)")
+```
+
+**Anggota tiap cluster:**
+
+```{r spectral-members, results='asis'}
+for (cl in sort(unique(spectral_labels))) {
+  members <- rownames(data)[spectral_labels == cl]
+  cat(sprintf("- **Cluster %d**: %s\n", cl, paste(members, collapse = ", ")))
+}
+```
+
+**Interpretasi hasil:**
+
+Spectral Clustering berhasil membagi 10 observasi ke dalam **3 cluster** tanpa ada noise — semua observasi masuk ke salah satu cluster. Pembagian ini mencerminkan struktur kemiripan dalam ruang graf RBF, yang tidak selalu sama dengan jarak Euclidean biasa. Karena Spectral Clustering mempertimbangkan konektivitas global antar titik, ia dapat memisahkan kelompok yang mungkin saling tumpang tindih jika hanya dilihat dari jarak langsung.
+
+------------------------------------------------------------------------
+
+# Metode 3 – Model-Based Clustering (GMM via Mclust)
+
+## Konsep & Parameter
+
+**Model-Based Clustering** mengasumsikan bahwa data dihasilkan dari campuran beberapa distribusi probabilistik — dalam hal ini **Gaussian Mixture Model (GMM)**. Setiap cluster dimodelkan sebagai distribusi Gaussian dengan mean dan matriks kovarians tersendiri. Parameter model diestimasi menggunakan algoritma **EM (Expectation-Maximization)**.
+
+**Keunggulan GMM:**
+
+-   Menghasilkan **probabilitas keanggotaan** (*soft assignment*) — setiap observasi memiliki probabilitas berbeda untuk setiap cluster.
+-   Fleksibel dalam bentuk cluster, bergantung pada tipe kovarians yang dipilih.
+-   Model dipilih secara otomatis berdasarkan kriteria **BIC** (*Bayesian Information Criterion*).
+
+**Parameter yang digunakan:**
+
+| Parameter       | Nilai    | Penjelasan                                      |
+|---------------------------|------------------|---------------------------|
+| `G`             | 3        | Jumlah komponen Gaussian (cluster)              |
+| Model kovarians | otomatis | Dipilih oleh `Mclust` berdasarkan BIC tertinggi |
+
+```{r gmm}
+set.seed(42)
+mb         <- Mclust(X_scaled, G = 3, verbose = FALSE)
+gmm_labels <- mb$classification
+gmm_proba  <- mb$z
+
+result_gmm <- data.frame(
+  Observasi   = rownames(data),
+  Cluster_GMM = paste0("Cluster ", gmm_labels)
+)
+
+kable(result_gmm,
+      caption = sprintf("Hasil GMM (n_components=3, covariance_type=%s)", mb$modelName))
+```
+
+**Informasi model yang terpilih:**
+
+| Metrik              | Nilai                                    |
+|---------------------|------------------------------------------|
+| **Model kovarians** | `r mb$modelName`                         |
+| **AIC**             | `r round(-2 * mb$loglik + 2 * mb$df, 2)` |
+| **BIC**             | `r round(mb$bic, 2)`                     |
+
+> Model **`r mb$modelName`** dipilih oleh `Mclust` karena memberikan nilai BIC terbaik di antara berbagai kandidat model kovarians. Dalam notasi `mclust`, huruf-huruf pada nama model menggambarkan karakteristik kovarians: volume, bentuk, dan orientasi cluster.
+
+## Probabilitas Keanggotaan (GMM)
+
+Salah satu fitur paling informatif dari GMM adalah kemampuannya menghasilkan **probabilitas keanggotaan lunak (soft assignment)**. Berbeda dari DBSCAN dan Spectral Clustering yang memberikan label tegas (hard assignment), GMM menyatakan seberapa besar keyakinan bahwa suatu observasi berasal dari masing-masing cluster.
+
+```{r gmm-proba}
+proba_df           <- as.data.frame(round(gmm_proba, 3))
+colnames(proba_df) <- paste0("P(Cluster ", 1:3, ")")
+rownames(proba_df) <- rownames(data)
+
+kable(proba_df, caption = "Probabilitas Keanggotaan Tiap Observasi (GMM)")
+```
+
+**Cara membaca tabel ini:** Nilai mendekati **1.000** berarti observasi tersebut dengan sangat yakin termasuk dalam cluster itu. Nilai mendekati **0.000** berarti hampir pasti bukan anggota. Observasi dengan probabilitas tinggi di satu cluster disebut observasi yang **well-separated**, sedangkan yang memiliki probabilitas moderat di beberapa cluster menunjukkan **ambiguitas keanggotaan** — observasi tersebut berada di "batas" antar cluster.
+
+------------------------------------------------------------------------
+
+# Visualisasi Perbandingan Ketiga Metode
+
+Visualisasi berikut menampilkan hasil ketiga metode clustering dalam ruang PCA 2 dimensi. Perlu diingat bahwa clustering dilakukan pada data 4 dimensi — PCA hanya digunakan untuk memudahkan visualisasi. Oleh karena itu, ada kemungkinan dua titik yang terlihat berdekatan di plot 2D sebenarnya relatif jauh di ruang 4 dimensi, dan sebaliknya.
+
+```{r palette-setup, echo=FALSE}
+PALETTE <- c("#E63946", "#2A9D8F", "#E9C46A", "#999999")
+
+pca_df <- cbind(X_pca, data.frame(
+  Obs      = rownames(data),
+  DBSCAN   = ifelse(dbscan_labels == 0, "Noise", paste0("Cluster ", dbscan_labels)),
+  Spectral = paste0("Cluster ", spectral_labels),
+  GMM      = paste0("Cluster ", gmm_labels)
+))
+
+label_db  <- c("Cluster 1" = PALETTE[1], "Noise" = PALETTE[4])
+label_sp  <- setNames(PALETTE[1:3], paste0("Cluster ", 1:3))
+label_gmm <- setNames(PALETTE[1:3], paste0("Cluster ", 1:3))
+
+theme_cluster <- function(title_str) {
+  list(
+    theme_minimal(base_size = 11),
+    theme(
+      plot.title       = element_text(face = "bold", size = 13, hjust = 0.5,
+                                      margin = margin(b = 6)),
+      plot.background  = element_rect(fill = "#F9F9F9", color = NA),
+      panel.background = element_rect(fill = "#F9F9F9", color = NA),
+      panel.grid.major = element_line(color = "#E0E0E0", linetype = "dashed"),
+      panel.grid.minor = element_blank(),
+      legend.position  = "bottom",
+      legend.title     = element_blank(),
+      legend.text      = element_text(size = 9),
+      axis.title       = element_text(size = 9),
+      axis.text        = element_text(size = 8)
+    ),
+    labs(title = title_str,
+         x = sprintf("PC1 (%.1f%%)", var_exp[1]),
+         y = sprintf("PC2 (%.1f%%)", var_exp[2]))
+  )
+}
+```
+
+```{r viz-comparison, fig.width=14, fig.height=5}
+p_db <- ggplot(pca_df, aes(PC1, PC2, color = DBSCAN, shape = DBSCAN)) +
+  geom_point(size = 4, alpha = 0.9, stroke = 0.8) +
+  geom_text_repel(aes(label = Obs), size = 3, color = "#333333",
+                  box.padding = 0.4, point.padding = 0.3, max.overlaps = 20) +
+  scale_color_manual(values = label_db) +
+  scale_shape_manual(values = c("Cluster 1" = 16, "Noise" = 4)) +
+  theme_cluster("DBSCAN")
+
+p_sp <- ggplot(pca_df, aes(PC1, PC2, color = Spectral, shape = Spectral)) +
+  geom_point(size = 4, alpha = 0.9, stroke = 0.8) +
+  geom_text_repel(aes(label = Obs), size = 3, color = "#333333",
+                  box.padding = 0.4, point.padding = 0.3, max.overlaps = 20) +
+  scale_color_manual(values = label_sp) +
+  scale_shape_manual(values = c("Cluster 1" = 16, "Cluster 2" = 17, "Cluster 3" = 15)) +
+  theme_cluster("Spectral Clustering")
+
+p_gmm <- ggplot(pca_df, aes(PC1, PC2, color = GMM, shape = GMM)) +
+  geom_point(size = 4, alpha = 0.9, stroke = 0.8) +
+  geom_text_repel(aes(label = Obs), size = 3, color = "#333333",
+                  box.padding = 0.4, point.padding = 0.3, max.overlaps = 20) +
+  scale_color_manual(values = label_gmm) +
+  scale_shape_manual(values = c("Cluster 1" = 16, "Cluster 2" = 17, "Cluster 3" = 15)) +
+  theme_cluster(sprintf("Model-Based / GMM (%s)", mb$modelName))
+
+(p_db | p_sp | p_gmm) +
+  plot_annotation(
+    title    = "Perbandingan Hasil Clustering pada Data (X1–X4)",
+    subtitle = sprintf("Visualisasi Ruang PCA (%.1f%% variansi)", total_var),
+    theme    = theme(
+      plot.title    = element_text(face = "bold", size = 15, hjust = 0.5),
+      plot.subtitle = element_text(size = 11, hjust = 0.5, color = "gray40"),
+      plot.background = element_rect(fill = "white", color = NA)
+    )
+  )
+```
+
+**Membaca visualisasi di atas:**
+
+-   **DBSCAN (kiri):** Hasil DBSCAN menunjukkan sebagian besar observasi tergabung ke dalam satu cluster utama berwarna merah, sedangkan satu titik yaitu Obs-8 teridentifikasi sebagai noise yang ditandai simbol × abu-abu. Hal ini menunjukkan bahwa DBSCAN menganggap sebagian besar data masih berada dalam kepadatan yang saling terhubung, sementara Obs-8 memiliki karakteristik yang cukup berbeda dibanding titik lainnya sehingga tidak masuk ke dalam cluster utama.
+
+-   **Spectral Clustering (tengah):** Spectral Clustering berhasil membagi data menjadi tiga kelompok yang relatif lebih seimbang. Cluster 1 (merah) berisi observasi yang cenderung berada pada sisi kanan bawah, Cluster 2 (hijau) berada pada area tengah hingga atas, sedangkan Cluster 3 (kuning) banyak tersebar pada sisi kiri dan kanan tertentu. Pemisahan ini menunjukkan bahwa metode Spectral Clustering mampu menangkap hubungan antar titik berdasarkan struktur konektivitas global data.
+
+-   **GMM (kanan):** Model-Based Clustering/GMM juga membentuk tiga cluster, namun pola pengelompokannya terlihat lebih fleksibel dibanding Spectral Clustering. Cluster hijau mendominasi area atas dan kiri, cluster merah berada pada bagian bawah, sedangkan cluster kuning cenderung berada pada sisi kanan grafik. Pendekatan GMM mengelompokkan data berdasarkan distribusi probabilitas Gaussian sehingga pembagian cluster tampak lebih halus dan adaptif terhadap sebaran data.
+
+# Evaluasi & Metrik Perbandingan
+
+## Penjelasan Metrik
+
+Untuk mengevaluasi kualitas clustering secara kuantitatif, digunakan tiga metrik yang tidak memerlukan label ground truth (*unsupervised evaluation metrics*):
+
+| Metrik | Cara Membaca | Nilai Terbaik |
+|------------------|--------------------------|----------------------------|
+| **Silhouette Score** | Seberapa mirip suatu titik dengan clusternya sendiri dibanding cluster lain. Rentang: −1 hingga 1. | **Mendekati 1** (lebih tinggi = lebih baik) |
+| **Davies-Bouldin Index (DBI)** | Rata-rata rasio jarak intra-cluster terhadap jarak antar-cluster. | **Mendekati 0** (lebih rendah = lebih baik) |
+| **Calinski-Harabasz Index (CHI)** | Rasio variansi antar-cluster terhadap variansi intra-cluster. | **Lebih tinggi = lebih baik** |
+
+```{r metric-functions, echo=FALSE}
+sil_score <- function(X, labels) {
+  valid <- labels[labels != 0]
+  if (length(unique(valid)) < 2) return(NA)
+  idx <- which(labels != 0)
+  X2  <- X[idx, ]; lb <- labels[idx]; n <- nrow(X2)
+  a <- numeric(n); b <- numeric(n)
+  for (i in 1:n) {
+    same  <- which(lb == lb[i])
+    other <- which(lb != lb[i])
+    a[i]  <- if (length(same) > 1)
+      mean(sqrt(rowSums((X2[same, ] - X2[rep(i, length(same)), ])^2))) else 0
+    cl_b  <- tapply(sqrt(rowSums((X2[other, ] - X2[rep(i, length(other)), ])^2)),
+                    lb[other], mean)
+    b[i]  <- min(cl_b)
+  }
+  round(mean((b - a) / pmax(a, b)), 4)
+}
+
+db_score <- function(X, labels) {
+  valid <- labels[labels != 0]
+  if (length(unique(valid)) < 2) return(NA)
+  idx <- which(labels != 0)
+  X2  <- X[idx, ]; lb <- labels[idx]
+  cls <- sort(unique(lb)); k <- length(cls)
+  centroids <- t(sapply(cls, function(c)
+    colMeans(X2[lb == c, , drop = FALSE])))
+  s <- sapply(1:k, function(i) {
+    xi <- X2[lb == cls[i], , drop = FALSE]
+    mean(sqrt(rowSums((xi - matrix(centroids[i, ], nrow(xi), ncol(xi), byrow = TRUE))^2)))
+  })
+  db_vals <- numeric(k)
+  for (i in 1:k) {
+    rij <- numeric(k)
+    for (j in 1:k) {
+      if (i != j) {
+        dij    <- sqrt(sum((centroids[i, ] - centroids[j, ])^2))
+        rij[j] <- (s[i] + s[j]) / dij
+      }
+    }
+    db_vals[i] <- max(rij)
+  }
+  round(mean(db_vals), 4)
+}
+
+ch_score <- function(X, labels) {
+  valid <- labels[labels != 0]
+  if (length(unique(valid)) < 2) return(NA)
+  idx <- which(labels != 0)
+  X2  <- X[idx, ]; lb <- labels[idx]
+  n   <- nrow(X2); cls <- sort(unique(lb)); k <- length(cls)
+  grand_mean <- colMeans(X2)
+  centroids  <- t(sapply(cls, function(c)
+    colMeans(X2[lb == c, , drop = FALSE])))
+  ns   <- sapply(cls, function(c) sum(lb == c))
+  bgss <- sum(ns * rowSums((centroids - matrix(grand_mean, k, ncol(X2), byrow = TRUE))^2))
+  wgss <- sum(sapply(1:k, function(i) {
+    xi <- X2[lb == cls[i], , drop = FALSE]
+    sum(rowSums((xi - matrix(centroids[i, ], nrow(xi), ncol(xi), byrow = TRUE))^2))
+  }))
+  round((bgss / (k - 1)) / (wgss / (n - k)), 4)
+}
+```
+
+```{r metrics-table}
+metrics_df <- data.frame(
+  Metode              = c("DBSCAN", "Spectral Clustering", "GMM (Model-Based)"),
+  Jumlah_Cluster      = c(n_clusters_db, 3, 3),
+  Jumlah_Noise        = c(n_noise_db, 0, 0),
+  Silhouette          = c(sil_score(X_scaled, dbscan_labels),
+                          sil_score(X_scaled, spectral_labels),
+                          sil_score(X_scaled, gmm_labels)),
+  Davies_Bouldin      = c(db_score(X_scaled, dbscan_labels),
+                          db_score(X_scaled, spectral_labels),
+                          db_score(X_scaled, gmm_labels)),
+  Calinski_Harabasz   = c(ch_score(X_scaled, dbscan_labels),
+                          ch_score(X_scaled, spectral_labels),
+                          ch_score(X_scaled, gmm_labels))
+)
+
+kable(metrics_df, caption = "Metrik Evaluasi Ketiga Metode Clustering", digits = 4)
+```
+
+```{r metrics-plot, fig.height=5}
+met_long <- melt(
+  metrics_df[, c("Metode","Silhouette","Davies_Bouldin","Calinski_Harabasz")],
+  id.vars = "Metode", variable.name = "Metrik", value.name = "Nilai"
+)
+
+ggplot(met_long, aes(x = Metode, y = Nilai, fill = Metode)) +
+  geom_col(width = 0.6, alpha = 0.85, color = "white", linewidth = 0.5) +
+  geom_text(aes(label = round(Nilai, 3)), vjust = -0.4, size = 3.2,
+            fontface = "bold") +
+  facet_wrap(~Metrik, scales = "free_y", ncol = 3) +
+  scale_fill_manual(values = c("#E63946", "#2A9D8F", "#E9C46A")) +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position    = "none",
+    strip.text         = element_text(face = "bold", size = 11),
+    axis.text.x        = element_text(size = 9, angle = 10, hjust = 1),
+    panel.grid.major.x = element_blank(),
+    plot.title         = element_text(face = "bold", hjust = 0.5, size = 13),
+    plot.background    = element_rect(fill = "white", color = NA)
+  ) +
+  labs(title = "Evaluasi & Metrik Perbandingan Clustering", x = NULL, y = "Nilai")
+```
+
+## Interpretasi Metrik
+
+> **Catatan penting:** Perbandingan metrik antar metode ini perlu dilakukan dengan hati-hati. DBSCAN hanya menghasilkan 1 cluster (sisanya noise), sehingga metrik berbasis pemisahan antar cluster tidak dapat dihitung untuk DBSCAN, nilai yang muncul hanya mencerminkan kekompakan titik-titik yang masuk cluster, bukan kualitas pemisahan secara keseluruhan.
+
+Untuk **Spectral Clustering vs GMM** (keduanya menghasilkan 3 cluster), bandingkan:
+
+-   **Silhouette Score:** Nilai yang lebih tinggi menunjukkan cluster yang lebih kompak dan terpisah dengan baik. Metode dengan Silhouette lebih tinggi menghasilkan pengelompokan yang lebih "bersih".
+-   **Davies-Bouldin Index:** Nilai lebih rendah berarti cluster lebih kompak secara internal dan lebih terpisah dari cluster lain — kondisi ideal.
+-   **Calinski-Harabasz Index:** Nilai lebih tinggi berarti pemisahan antar cluster jauh lebih besar dibanding variasi di dalam cluster — semakin tinggi semakin baik.
+
+------------------------------------------------------------------------
+
+# Rekap Hasil Cluster per Observasi
+
+Tabel berikut merangkum label cluster yang diberikan oleh ketiga metode untuk setiap observasi, beserta kolom **Konsisten** yang menunjukkan apakah ketiga metode sepakat dalam pengelompokan observasi tersebut.
+
+```{r rekap-table}
+summary_df <- data.frame(
+  Observasi = rownames(data),
+  DBSCAN    = ifelse(dbscan_labels == 0, "Noise", paste0("Cluster ", dbscan_labels)),
+  Spectral  = paste0("Cluster ", spectral_labels),
+  GMM       = paste0("Cluster ", gmm_labels)
+)
+summary_df$Konsisten <- apply(summary_df[, 2:4], 1, function(r) {
+  if (r[1] == "Noise") return("~")
+  if (r[1] == r[2] && r[2] == r[3]) "✓" else "~"
+})
+
+kable(summary_df, caption = "Rekap Hasil Cluster per Observasi (✓ = ketiga metode setuju)")
+```
+
+**Catatan:** Tanda `~` tidak selalu berarti hasil yang buruk perbedaan antar metode justru mencerminkan karakteristik dan asumsi masing-masing algoritma yang berbeda. Perbedaan terbesar wajar terjadi karena DBSCAN mendeteksi banyak noise, sementara Spectral dan GMM memaksa semua observasi masuk ke salah satu cluster.
+
+## Profil Rata-Rata Tiap Cluster (GMM)
+
+Tabel berikut menampilkan rata-rata nilai variabel X1–X4 untuk setiap cluster hasil GMM. Profil ini membantu kita memahami **karakteristik khas** masing-masing kelompok.
+
+```{r profil-gmm}
+data_gmm <- cbind(data, Cluster = paste0("Cluster ", gmm_labels))
+agg_gmm  <- aggregate(. ~ Cluster,
+                       data_gmm[, c("X1","X2","X3","X4","Cluster")],
+                       mean)
+agg_gmm[, -1] <- round(agg_gmm[, -1], 2)
+
+kable(agg_gmm, caption = "Profil Rata-Rata Variabel per Cluster (GMM)")
+```
+
+------------------------------------------------------------------------
+
+# Heatmap Probabilitas Keanggotaan (GMM)
+
+Heatmap di bawah ini memvisualisasikan probabilitas keanggotaan lunak (*soft membership*) dari GMM. Warna yang lebih merah/gelap menunjukkan probabilitas tinggi (keyakinan kuat), sementara warna putih/kuning menunjukkan probabilitas rendah.
+
+```{r heatmap, fig.height=6, fig.width=7}
+proba_long <- melt(data.frame(
+  Observasi  = rownames(data),
+  `Cluster 1` = round(gmm_proba[, 1], 3),
+  `Cluster 2` = round(gmm_proba[, 2], 3),
+  `Cluster 3` = round(gmm_proba[, 3], 3),
+  check.names = FALSE
+), id.vars = "Observasi", variable.name = "Cluster", value.name = "Probabilitas")
+
+proba_long$Observasi <- factor(proba_long$Observasi,
+                               levels = rev(paste0("Obs-", 1:10)))
+
+ggplot(proba_long, aes(x = Cluster, y = Observasi, fill = Probabilitas)) +
+  geom_tile(color = "white", linewidth = 0.8) +
+  geom_text(aes(label = sprintf("%.3f", Probabilitas)),
+            size  = 3.5, fontface = "bold",
+            color = ifelse(proba_long$Probabilitas > 0.5, "white", "#333333")) +
+  scale_fill_gradient2(low = "#FFFFFF", mid = "#E9C46A", high = "#E63946",
+                       midpoint = 0.5, limits = c(0, 1),
+                       name = "Probabilitas") +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title      = element_text(face = "bold", hjust = 0.5, size = 13),
+    plot.subtitle   = element_text(hjust = 0.5, size = 10, color = "gray40"),
+    axis.title      = element_blank(),
+    legend.position = "right",
+    panel.grid      = element_blank(),
+    plot.background = element_rect(fill = "white", color = NA)
+  ) +
+  labs(title    = "Probabilitas Keanggotaan Tiap Observasi (GMM)",
+       subtitle = "Nilai mendekati 1 = kepastian tinggi")
+```
+
+**Interpretasi heatmap:**
+
+-   Observasi yang menampilkan **satu sel merah gelap dan dua sel putih** adalah observasi yang sangat jelas kelompoknya — GMM sangat yakin ia masuk ke satu cluster tertentu.
+-   Observasi yang memiliki **beberapa sel dengan warna sedang (kuning/oranye)** menunjukkan **ambiguitas** observasi tersebut berada di perbatasan antar cluster. Dalam konteks praktis, observasi semacam ini perlu diperhatikan lebih lanjut, misalnya dengan mempertimbangkan informasi domain.
+-   Secara keseluruhan, semakin "kontras" pola setiap baris (satu sel dominan, sisanya mendekati nol), semakin baik pemisahan cluster secara probabilistik.
+
+------------------------------------------------------------------------
+
+# Interpretasi & Kesimpulan
+
+## Perbandingan Karakteristik Metode
+
+```{r karakteristik-table}
+aspek_df <- data.frame(
+  Aspek = c(
+    "Pendekatan dasar",
+    "Asumsi bentuk cluster",
+    "Penanganan noise/outlier",
+    "Tipe keanggotaan",
+    "Parameter utama",
+    "Perlu jumlah cluster di awal?",
+    "Sensitif terhadap skala?"
+  ),
+  DBSCAN = c(
+    "Density-based",
+    "Bebas (arbitrary shape)",
+    "Otomatis (diberi label noise)",
+    "Hard (0/1)",
+    "eps, minPts",
+    "Tidak",
+    "Ya"
+  ),
+  `Spectral Clustering` = c(
+    "Graph & eigenvalue decomposition",
+    "Bebas (non-convex)",
+    "Semua titik masuk cluster",
+    "Hard (0/1)",
+    "n_clusters, gamma/sigma",
+    "Ya",
+    "Ya"
+  ),
+  `GMM (Model-Based)` = c(
+    "Probabilistik (distribusi Gaussian)",
+    "Ellipsoidal (bergantung kovarians)",
+    "Semua titik masuk cluster",
+    "Soft (probabilistik)",
+    "n_components, tipe kovarians",
+    "Ya",
+    "Ya"
+  ),
+  check.names = FALSE
+)
+
+kable(aspek_df, caption = "Perbandingan Karakteristik Metode Clustering",
+      align = c("l","c","c","c"))
+```
+
+## Interpretasi Tiap Cluster (GMM sebagai Referensi)
+
+GMM dipilih sebagai referensi interpretasi karena: (1) menghasilkan 3 cluster seperti Spectral, (2) menyediakan probabilitas keanggotaan yang informatif, dan (3) dipilih secara objektif berdasarkan BIC.
+
+```{r interpretasi, results='asis'}
+for (cl in 1:3) {
+  idx <- which(gmm_labels == cl)
+  obs <- rownames(data)[idx]
+  cmn <- round(colMeans(data[idx, , drop = FALSE]), 2)
+  cat(sprintf("\n### Cluster %d\n\n", cl))
+  cat(sprintf("**Observasi:** %s\n\n", paste(obs, collapse = ", ")))
+  cat(sprintf(
+    "**Rata-rata variabel:** X1 = %.2f | X2 = %.2f | X3 = %.2f | X4 = %.2f\n\n",
+    cmn["X1"], cmn["X2"], cmn["X3"], cmn["X4"]
+  ))
+}
+```
+
+Perbedaan rata-rata variabel antar cluster di atas menggambarkan "profil" masing-masing kelompok. Cluster dengan nilai X1 tinggi cenderung berbeda secara fundamental dari cluster dengan nilai X4 tinggi, misalnya. Profil inilah yang menjadi dasar interpretasi substantif — misalnya, jika variabel ini merepresentasikan fitur produk atau karakteristik pelanggan, cluster tersebut dapat diberi nama yang bermakna.
+
+## Ringkasan & Rekomendasi
+
+**Kesimpulan utama dari analisis ini:**
+
+1.  **DBSCAN** mendeteksi struktur yang paling konservatif — hanya 1 cluster besar dengan beberapa noise. Ini berguna ketika kita **tidak ingin memaksakan jumlah cluster** dan perlu mengidentifikasi outlier secara otomatis. Namun, pemilihan parameter `eps` sangat krusial dan sensitif.
+
+2.  **Spectral Clustering** berhasil memisahkan data menjadi 3 cluster dengan mempertimbangkan konektivitas global melalui graf kemiripan RBF. Metode ini cocok untuk data dengan **struktur non-linear atau non-convex** yang tidak dapat dipisahkan dengan baik menggunakan pendekatan berbasis jarak biasa.
+
+3.  **GMM (Model-Based)** memberikan informasi paling kaya berupa **probabilitas keanggotaan lunak**, sehingga ketidakpastian pengelompokan tiap observasi dapat dikuantifikasi. Model kovarians dipilih secara objektif melalui BIC, menjadikannya pilihan yang **dapat dipertanggungjawabkan secara statistik**.
+
+**Rekomendasi pemilihan metode:**
+
+-   Gunakan **DBSCAN** jika jumlah cluster tidak diketahui dan deteksi outlier penting.
+-   Gunakan **Spectral Clustering** jika data memiliki struktur non-linear atau cluster berbentuk kompleks.
+-   Gunakan **GMM** jika interpretasi probabilistik dan kerangka statistik formal diperlukan, terutama untuk pengambilan keputusan berbasis ketidakpastian. ") \`\`\`
+
+------------------------------------------------------------------------
+
+> **Catatan teknis:** Semua metode sensitif terhadap skala data — standarisasi adalah langkah wajib sebelum clustering. Pada dataset kecil (n=10), hasil clustering sangat dipengaruhi oleh pilihan parameter dan dapat berubah secara signifikan jika parameter diubah sedikit. Disarankan untuk melakukan **analisis sensitivitas parameter** pada dataset yang lebih besar sebelum menarik kesimpulan final.
